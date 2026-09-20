@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>svenska-tutor</title>
+  <meta name="theme-color" content="#101418" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>svenska-tutor</h1>
+      <label id="provider-wrap">
+        Provider:
+        <select id="provider">
+          <option value="gemini">Gemini</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </label>
+    </header>
+
+    <div id="banner" hidden></div>
+
+    <section id="avatar-zone" aria-hidden="true">
+      <div id="avatar-ring"><div id="avatar-core">SV</div></div>
+      <div id="level-meter"><div id="level-bar"></div></div>
+    </section>
+
+    <section id="controls">
+      <button id="mic" disabled>Start session</button>
+      <button id="stop" hidden>End session</button>
+    </section>
+
+    <section id="transcript" aria-live="polite">
+      <div class="tt-head">
+        <span>Svenska</span><span>ไทย</span>
+      </div>
+      <div id="tt-user" class="tt-row"><em>—</em></div>
+      <div id="tt-tutor" class="tt-row"><em>—</em></div>
+    </section>
+
+    <footer>
+      <span id="status">idle</span>
+      <span id="session-minutes"></span>
+    </footer>
+  </main>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
