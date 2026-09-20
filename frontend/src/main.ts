@@ -339,3 +339,31 @@ async function downscaleToJpeg(file: File, maxEdge: number): Promise<string> {
 document.querySelector<HTMLButtonElement>("#photo")!.addEventListener("click", () => {
   document.querySelector<HTMLInputElement>("#photo-input")!.click();
 });
+
+// --- iOS polish (P1-6) ---
+// Wake Locks expire on backgrounding: re-acquire on visibility return.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.running) {
+    if (!state.wakeLock) {
+      void navigator.wakeLock?.request("screen").then((lock) => { state.wakeLock = lock; }).catch(() => {});
+    }
+    void state.audioCtx?.resume();
+  }
+});
+
+// Warn before leaving mid-session
+window.addEventListener("beforeunload", (ev) => {
+  if (state.running) ev.preventDefault();
+});
+
+// Session minutes ticker
+setInterval(() => {
+  if (!state.running) return;
+  const mins = Math.floor((Date.now() - state.startedAt) / 60000);
+  document.querySelector<HTMLElement>("#session-minutes")!.textContent = `${mins} min`;
+}, 15000);
+
+// Service worker registration (PWA install)
+if ("serviceWorker" in navigator) {
+  void navigator.serviceWorker.register("/sw.js");
+}
