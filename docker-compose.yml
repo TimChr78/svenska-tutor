@@ -1,0 +1,14 @@
+services:
+  svenska-tutor:
+    build: .
+    container_name: svenska-tutor
+    ports:
+      - "3000:3000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - APP_PASSWORD=${APP_PASSWORD}
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
