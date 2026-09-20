@@ -89,6 +89,20 @@ function parseOpenAIMsg(msg: Record<string, unknown>): void {
   }
 }
 
+import { initAvatar, setAvatarMouth, avatarActive } from './avatar';
+
+let analyser: AnalyserNode | null = null;
+let tutorAudioReady = false;
+
+function audioRms(): number {
+  if (!analyser) return 0;
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (const v of buf) { const x = (v - 128) / 128; sum += x * x; }
+  return Math.sqrt(sum / buf.length);
+}
+
 function authHeaders(): HeadersInit {
   const pass = localStorage.getItem("app_password") ?? "";
   return { Authorization: `Bearer ${pass}` };
@@ -216,6 +230,10 @@ async function startSession(): Promise<void> {
 
   state.running = true;
   state.startedAt = Date.now();
+  if (!avatarActive()) {
+    const canvas = document.querySelector<HTMLCanvasElement>('#avatar-canvas');
+    if (canvas) void initAvatar(canvas);
+  }
   document.querySelector<HTMLButtonElement>("#mic")!.hidden = true;
   document.querySelector<HTMLButtonElement>("#stop")!.hidden = false;
   document.querySelector<HTMLButtonElement>("#mic")!.disabled = true;
@@ -236,9 +254,38 @@ async function stopSession(): Promise<void> {
   setStatus("idle");
 }
 
-function playAudio(_pcm: ArrayBuffer): void {
-  // playback queue lands in P1-2 (Gemini adapter) — 24kHz PCM scheduling
+let playbackCtx: AudioContext | null = null;
+
+function playAudio(pcm: ArrayBuffer | Blob): void {
+  // Tutor playback: PCM16 24kHz mono from the provider. Schedule + analyse.
+  if (!playbackCtx) playbackCtx = new AudioContext({ sampleRate: 24000 });
+  const ctx = playbackCtx;
+  void ctx.resume();
+  const buf = pcm instanceof ArrayBuffer ? pcm : null;
+  if (!buf) return;
+  const i16 = new Int16Array(buf);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = (i16[i] ?? 0) / 0x8000;
+  const buffer = ctx.createBuffer(1, f32.length, 24000);
+  buffer.copyToChannel(f32, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  if (!analyser) {
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+  }
+  src.connect(analyser);
+  analyser.connect(ctx.destination);
+  src.start();
+  tutorAudioReady = true;
 }
+
+// mouth animation loop: RMS from the analyser -> VRM mouth
+setInterval(() => {
+  if (avatarActive() && tutorAudioReady) setAvatarMouth(audioRms());
+}, 80);
+
 
 document.querySelector<HTMLButtonElement>("#mic")!.addEventListener("click", () => void startSession());
 document.querySelector<HTMLButtonElement>("#stop")!.addEventListener("click", () => void stopSession());
