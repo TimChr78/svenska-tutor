@@ -192,3 +192,58 @@ if FRONTEND_DIST.exists():
         if candidate.is_file():
             return FileResponse(candidate)
         return FileResponse(FRONTEND_DIST / "index.html")
+
+
+class VisionRequest(BaseModel):
+    image_b64: str
+    mime: str = "image/jpeg"
+    question: str = (
+        "This is a Swedish homework page. Describe each exercise briefly in "
+        "simple Thai, then explain how to approach it. Do not give the final "
+        "answers — guide step by step."
+    )
+
+
+@app.post("/api/vision/{provider}")
+def vision(provider: str, body: VisionRequest,
+           authorization: str = Depends(require_password)) -> dict:
+    """One-shot vision explanation of a homework photo (both providers).
+    Gemini also supports in-session images, but this endpoint gives a
+    provider-independent 'explain this page' flow for both."""
+    import httpx
+
+    image_url = f"data:{body.mime};base64,{body.image_b64}"
+    if provider == "gemini":
+        key = os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
+        resp = httpx.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+            headers={"x-goog-api-key": key},
+            json={"contents": [{"parts": [
+                {"text": body.question},
+                {"inline_data": {"mime_type": body.mime, "data": body.image_b64}},
+            ]}]},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        parts = resp.json()["candidates"][0]["content"]["parts"]
+        text = " ".join(p.get("text", "") for p in parts).strip()
+        return {"explanation": text}
+
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY not configured")
+    model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
+    resp = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": body.question},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]}]},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    text = resp.json()["choices"][0]["message"]["content"].strip()
+    return {"explanation": text}

@@ -248,3 +248,47 @@ document.addEventListener("visibilitychange", () => {
     void state.audioCtx.resume();
   }
 });
+
+
+// --- photo homework mode ---
+document.querySelector<HTMLInputElement>("#photo-input")!.addEventListener("change", async (ev) => {
+  const file = (ev.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+  setStatus("reading homework…");
+  const b64 = await downscaleToJpeg(file, 1568);
+  const provider = document.querySelector<HTMLSelectElement>("#provider")!.value;
+  const resp = await fetch(`/api/vision/${provider}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ image_b64: b64, mime: "image/jpeg" }),
+  });
+  const data = (await resp.json()) as { explanation?: string; detail?: string };
+  if (!resp.ok || !data.explanation) {
+    banner(`Homework explain failed: ${data.detail ?? resp.status}`);
+    return;
+  }
+  const panel = document.querySelector<HTMLElement>("#explanation")!;
+  panel.hidden = false;
+  document.querySelector<HTMLElement>("#explanation-text")!.textContent = data.explanation;
+  // Gemini: also inject the photo into the live session so she can talk about it
+  if (provider === "gemini" && state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({
+      realtimeInput: { mediaChunks: [{ mimeType: "image/jpeg", data: b64 }] },
+    }));
+  }
+  setStatus("homework explained");
+});
+
+async function downscaleToJpeg(file: File, maxEdge: number): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1]!;
+}
+
+document.querySelector<HTMLButtonElement>("#photo")!.addEventListener("click", () => {
+  document.querySelector<HTMLInputElement>("#photo-input")!.click();
+});

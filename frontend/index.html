@@ -31,6 +31,9 @@
     <section id="controls">
       <button id="mic" disabled>Start session</button>
       <button id="stop" hidden>End session</button>
+      <button id="photo" title="Photograph homework">📷 Homework</button>
+      <input id="photo-input" type="file" accept="image/*" capture="environment" hidden />
+
     </section>
 
     <section id="transcript" aria-live="polite">
@@ -39,6 +42,11 @@
       </div>
       <div id="tt-user" class="tt-row"><em>—</em></div>
       <div id="tt-tutor" class="tt-row"><em>—</em></div>
+    </section>
+
+    <section id="explanation" hidden>
+      <div class="tt-head"><span>Hemläxa — förklaring (Thai/Svenska)</span></div>
+      <div id="explanation-text"></div>
     </section>
 
     <footer>
