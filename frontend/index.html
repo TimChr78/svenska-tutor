@@ -24,16 +24,18 @@
     <div id="banner" hidden></div>
 
     <section id="avatar-zone" aria-hidden="true">
-      <canvas id="avatar-canvas" width="360" height="360"></canvas>
-      <div id="avatar-ring" hidden><div id="avatar-core">SV</div></div>
+      <div id="avatar-ring"><div id="avatar-core">SV</div></div>
+      <canvas id="avatar-canvas" width="360" height="360" hidden></canvas>
       <div id="level-meter"><div id="level-bar"></div></div>
     </section>
 
     <section id="controls">
-      <button id="mic" disabled>Start session</button>
+      <button id="mic">Start session</button>
       <button id="stop" hidden>End session</button>
-      <button id="photo" title="Photograph homework">📷 Homework</button>
-      <input id="photo-input" type="file" accept="image/*" capture="environment" hidden />
+      <button id="photo-cam" title="Photograph homework">📷 Camera</button>
+      <button id="photo-gal" title="Pick from gallery">🖼️ Gallery</button>
+      <input id="photo-input-cam" type="file" accept="image/*" capture="environment" hidden />
+      <input id="photo-input-gal" type="file" accept="image/*" hidden />
 
     </section>
 

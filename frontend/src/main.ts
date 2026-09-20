@@ -120,10 +120,16 @@ function banner(msg: string): void {
 }
 
 async function startSession(): Promise<void> {
-  const providerSel = document.querySelector<HTMLSelectElement>("#provider");
-  const provider = (providerSel?.value ?? "gemini") as Provider;
-  state.provider = provider;
-  setStatus("minting token…");
+  try {
+    // Microphone requires a secure context (HTTPS or localhost) on iOS Safari.
+    if (!window.isSecureContext) {
+      banner("Microphone needs HTTPS. Open the app via the Tailscale HTTPS URL (see below).");
+      return;
+    }
+    const providerSel = document.querySelector<HTMLSelectElement>("#provider");
+    const provider = (providerSel?.value ?? "gemini") as Provider;
+    state.provider = provider;
+    setStatus("minting token…");
   const resp = await fetch(`/api/token/${provider}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -230,14 +236,29 @@ async function startSession(): Promise<void> {
 
   state.running = true;
   state.startedAt = Date.now();
+  const canvas = document.querySelector<HTMLCanvasElement>('#avatar-canvas');
+  if (canvas) {
+    void initAvatar(canvas).then((ok) => {
+      if (ok) {
+        canvas.hidden = false;
+        document.querySelector<HTMLElement>('#avatar-ring')!.hidden = true;
+      } else {
+        canvas.hidden = true;
+        document.querySelector<HTMLElement>('#avatar-ring')!.hidden = false;
+      }
+    });
+  }
   if (!avatarActive()) {
     const canvas = document.querySelector<HTMLCanvasElement>('#avatar-canvas');
     if (canvas) void initAvatar(canvas);
   }
-  document.querySelector<HTMLButtonElement>("#mic")!.hidden = true;
-  document.querySelector<HTMLButtonElement>("#stop")!.hidden = false;
-  document.querySelector<HTMLButtonElement>("#mic")!.disabled = true;
-  setStatus(token.mock ? "mock session" : "live");
+    document.querySelector<HTMLButtonElement>("#mic")!.hidden = true;
+    document.querySelector<HTMLButtonElement>("#stop")!.hidden = false;
+    setStatus(token.mock ? "mock session (no API key)" : "live");
+  } catch (err) {
+    banner(`Could not start: ${err instanceof Error ? err.message : String(err)}`);
+    setStatus("failed");
+  }
 }
 
 async function stopSession(): Promise<void> {
@@ -298,8 +319,8 @@ document.addEventListener("visibilitychange", () => {
 
 
 // --- photo homework mode ---
-document.querySelector<HTMLInputElement>("#photo-input")!.addEventListener("change", async (ev) => {
-  const file = (ev.target as HTMLInputElement).files?.[0];
+async function onPhotoFile(this: HTMLInputElement, _ev: Event): Promise<void> {
+  const file = this.files?.[0];
   if (!file) return;
   setStatus("reading homework…");
   const b64 = await downscaleToJpeg(file, 1568);
@@ -324,7 +345,6 @@ document.querySelector<HTMLInputElement>("#photo-input")!.addEventListener("chan
     }));
   }
   setStatus("homework explained");
-});
 
 async function downscaleToJpeg(file: File, maxEdge: number): Promise<string> {
   const bitmap = await createImageBitmap(file);
@@ -336,9 +356,14 @@ async function downscaleToJpeg(file: File, maxEdge: number): Promise<string> {
   return canvas.toDataURL("image/jpeg", 0.85).split(",")[1]!;
 }
 
-document.querySelector<HTMLButtonElement>("#photo")!.addEventListener("click", () => {
-  document.querySelector<HTMLInputElement>("#photo-input")!.click();
+document.querySelector<HTMLButtonElement>("#photo-cam")!.addEventListener("click", () => {
+  document.querySelector<HTMLInputElement>("#photo-input-cam")!.click();
 });
+document.querySelector<HTMLButtonElement>("#photo-gal")!.addEventListener("click", () => {
+  document.querySelector<HTMLInputElement>("#photo-input-gal")!.click();
+});
+document.querySelector<HTMLInputElement>("#photo-input-cam")!.addEventListener("change", onPhotoFile);
+document.querySelector<HTMLInputElement>("#photo-input-gal")!.addEventListener("change", onPhotoFile);
 
 // --- iOS polish (P1-6) ---
 // Wake Locks expire on backgrounding: re-acquire on visibility return.
@@ -366,4 +391,5 @@ setInterval(() => {
 // Service worker registration (PWA install)
 if ("serviceWorker" in navigator) {
   void navigator.serviceWorker.register("/sw.js");
+}
 }
