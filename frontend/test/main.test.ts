@@ -57,3 +57,31 @@ describe('LiveMsg serverContent parsing', () => {
     expect(out.tutorText).toBeUndefined();
   });
 });
+
+describe('OpenAI event parsing', () => {
+  function parseOpenAI(raw: string): { tutorText?: string; userText?: string } {
+    const msg = JSON.parse(raw) as { type: string; delta?: string; transcript?: string };
+    const out: { tutorText?: string; userText?: string } = {};
+    if (msg.type === 'response.output_audio_transcript.delta' && msg.delta) out.tutorText = msg.delta;
+    if (msg.type === 'conversation.item.input_audio_transcription.completed' && msg.transcript) out.userText = msg.transcript;
+    return out;
+  }
+
+  it('parses tutor transcript deltas', () => {
+    expect(parseOpenAI(JSON.stringify({
+      type: 'response.output_audio_transcript.delta', delta: 'Hej!',
+    })).tutorText).toBe('Hej!');
+  });
+
+  it('parses user transcription completion', () => {
+    expect(parseOpenAI(JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed', transcript: 'Jag heter Ann',
+    })).userText).toBe('Jag heter Ann');
+  });
+
+  it('ignores unrelated events', () => {
+    const out = parseOpenAI(JSON.stringify({ type: 'ping' }));
+    expect(out.tutorText).toBeUndefined();
+    expect(out.userText).toBeUndefined();
+  });
+});

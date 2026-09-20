@@ -88,6 +88,7 @@ class TokenResponse(BaseModel):
     credential: str | None = None
     ws_url: str | None = None
     mock: bool = False
+    model: str | None = None
 
 
 @app.post("/api/token/{provider}")
@@ -139,16 +140,18 @@ def mint_token(provider: str, body: TokenRequest,
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         return TokenResponse(provider=provider, mock=True, session_id_hint=session_id)  # type: ignore[call-arg]
+    model = os.environ.get("OPENAI_MODEL", "gpt-realtime-2.1")
     resp = httpx.post(
         "https://api.openai.com/v1/realtime/client_secrets",
         headers={"Authorization": f"Bearer {key}"},
-        json={"session": {"type": "realtime", "model": "gpt-realtime-2.1"}},
+        json={"session": {"type": "realtime", "model": model}},
         timeout=15,
     )
     resp.raise_for_status()
     secret = resp.json()["value"]
     return TokenResponse(provider=provider, credential=secret,
-                         ws_url="wss://api.openai.com/v1/realtime")
+                         ws_url=f"wss://api.openai.com/v1/realtime?model={model}",
+                         model=model)
 
 
 def _in_minutes(n: int) -> str:

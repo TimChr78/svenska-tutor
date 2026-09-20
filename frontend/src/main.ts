@@ -10,11 +10,13 @@ interface TokenResp {
   credential: string | null;
   ws_url: string | null;
   mock: boolean;
+  model?: string | null;
   detail?: string;
 }
 
 const state = {
   running: false,
+  provider: "gemini" as Provider,
   ws: null as WebSocket | null,
   audioCtx: null as AudioContext | null,
   mediaStream: null as MediaStream | null,
@@ -54,6 +56,39 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(bin);
 }
 
+
+
+// --- provider message parsers ---
+function parseGeminiMsg(msg: Record<string, unknown>): void {
+  const live = msg as unknown as LiveMsg;
+  if (live.setupComplete) setStatus("live — tutor listening");
+  const sc = live.serverContent;
+  if (!sc) return;
+  const parts = sc.modelTurn?.parts ?? [];
+  for (const p of parts) {
+    if (p.text) $("#tt-tutor")!.textContent = p.text;
+  }
+  if (sc.inputTranscription?.text) $("#tt-user")!.textContent = sc.inputTranscription.text;
+  if (sc.interrupted) setStatus("barge-in");
+}
+
+interface OpenAIMsg {
+  type: string;
+  delta?: string;
+  transcript?: string;
+}
+
+function parseOpenAIMsg(msg: Record<string, unknown>): void {
+  const m = msg as unknown as OpenAIMsg;
+  if (m.type === "session.created") setStatus("live — tutor listening");
+  if (m.type === "response.output_audio_transcript.delta" && m.delta) {
+    $("#tt-tutor")!.textContent = m.delta;
+  }
+  if (m.type === "conversation.item.input_audio_transcription.completed" && m.transcript) {
+    $("#tt-user")!.textContent = m.transcript;
+  }
+}
+
 function authHeaders(): HeadersInit {
   const pass = localStorage.getItem("app_password") ?? "";
   return { Authorization: `Bearer ${pass}` };
@@ -73,6 +108,7 @@ function banner(msg: string): void {
 async function startSession(): Promise<void> {
   const providerSel = document.querySelector<HTMLSelectElement>("#provider");
   const provider = (providerSel?.value ?? "gemini") as Provider;
+  state.provider = provider;
   setStatus("minting token…");
   const resp = await fetch(`/api/token/${provider}`, {
     method: "POST",
@@ -112,9 +148,15 @@ async function startSession(): Promise<void> {
     if (!(ev.data instanceof ArrayBuffer)) return;
     if (state.running && state.ws && state.ws.readyState === WebSocket.OPEN) {
       const b64 = arrayBufferToBase64(ev.data);
-      state.ws.send(JSON.stringify({
-        realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: b64 }] },
-      }));
+      if (state.provider === "gemini") {
+        state.ws.send(JSON.stringify({
+          realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: b64 }] },
+        }));
+      } else {
+        state.ws.send(JSON.stringify({
+          type: "input_audio_buffer.append", audio: b64,
+        }));
+      }
     }
   };
   const source = state.audioCtx.createMediaStreamSource(state.mediaStream);
@@ -128,29 +170,39 @@ async function startSession(): Promise<void> {
     state.ws.binaryType = "arraybuffer";
     state.ws.onopen = () => {
       setStatus("sending setup…");
-      state.ws!.send(JSON.stringify({
-        setup: {
-          model: "models/gemini-3.8-live",
-          generation_config: {
-            response_modalities: ["AUDIO"],
-            speech_config: { voice_config: { prebuilt_voice_config: { voice_name: "Aoede" } } },
+      if (provider === "gemini") {
+        state.ws!.send(JSON.stringify({
+          setup: {
+            model: "models/gemini-3.8-live",
+            generation_config: {
+              response_modalities: ["AUDIO"],
+              speech_config: { voice_config: { prebuilt_voice_config: { voice_name: "Aoede" } } },
+            },
+            system_instruction: { parts: [{ text: TUTOR_PROMPT }] },
           },
-          system_instruction: { parts: [{ text: TUTOR_PROMPT }] },
-        },
-      }));
+        }));
+      } else {
+        // OpenAI Realtime GA: session.update with pcm16 in/out + tutor instructions
+        state.ws!.send(JSON.stringify({
+          type: "session.update",
+          session: {
+            type: "realtime",
+            model: token.model ?? "gpt-realtime-2.1",
+            instructions: TUTOR_PROMPT,
+            voice: "alloy",
+            input_audio_format: "pcm16",
+            output_audio_format: "pcm16",
+            input_audio_transcription: { model: "whisper-1" },
+            turn_detection: { type: "server_vad" },
+          },
+        }));
+      }
     };
     state.ws.onmessage = (ev: MessageEvent) => {
-      if (typeof ev.data === "string") { /* JSON control/text frame */ } else { return void playAudio(ev.data); }
-      const msg = JSON.parse(ev.data as string) as LiveMsg;
-      if (msg.setupComplete) setStatus("live — tutor listening");
-      const sc = msg.serverContent;
-      if (!sc) return;
-      const parts = sc.modelTurn?.parts ?? [];
-      for (const p of parts) {
-        if (p.text) $("#tt-tutor")!.textContent = p.text;
-      }
-      if (sc.inputTranscription?.text) $("#tt-user")!.textContent = sc.inputTranscription.text;
-      if (sc.interrupted) setStatus("barge-in");
+      if (typeof ev.data !== "string") return void playAudio(ev.data);
+      const msg = JSON.parse(ev.data) as Record<string, unknown>;
+      if (provider === "gemini") return parseGeminiMsg(msg);
+      return parseOpenAIMsg(msg);
     };
     state.ws.onclose = (ev) => setStatus(`disconnected (${ev.code})`);
   }
