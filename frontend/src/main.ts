@@ -24,6 +24,36 @@ const state = {
   startedAt: 0,
 };
 
+
+// Shared tutor prompt (both providers) — see docs/plan.md.
+const TUTOR_PROMPT = `You are an encouraging Swedish language tutor for a native Thai speaker.
+- Primary spoken language: clear, natural Swedish adjusted for SFI learners.
+- Auxiliary language: Thai. If the user struggles, answers in Thai, or asks for
+  clarification, explain the grammar or vocabulary in simple Thai, then return
+  to Swedish.
+- Keep responses short (2-4 sentences) so the user speaks more than you do.
+- Correct major errors gently: repeat the sentence correctly, name the rule in
+  Thai, move on. Never interrupt the user's flow for minor slips.`;
+
+interface LiveMsg {
+  setupComplete?: boolean;
+  serverContent?: {
+    modelTurn?: { parts?: Array<{ text?: string }> };
+    inputTranscription?: { text?: string };
+    turnComplete?: boolean;
+    interrupted?: boolean;
+  };
+}
+
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
 function authHeaders(): HeadersInit {
   const pass = localStorage.getItem("app_password") ?? "";
   return { Authorization: `Bearer ${pass}` };
@@ -77,9 +107,14 @@ async function startSession(): Promise<void> {
   await state.audioCtx.audioWorklet.addModule("/src/worklets/recorder-worklet.js");
   state.worklet = new AudioWorkletNode(state.audioCtx, "pcm-recorder");
   state.worklet.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+    // Barge-in: keep sending while the tutor speaks; the model's VAD handles
+    // turn-taking. Gemini shape: realtimeInput.mediaChunks, base64 PCM16.
+    if (!(ev.data instanceof ArrayBuffer)) return;
     if (state.running && state.ws && state.ws.readyState === WebSocket.OPEN) {
-      // barge-in: keep sending while tutor speaks; server-side VAD handles it
-      state.ws.send(ev.data);
+      const b64 = arrayBufferToBase64(ev.data);
+      state.ws.send(JSON.stringify({
+        realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: b64 }] },
+      }));
     }
   };
   const source = state.audioCtx.createMediaStreamSource(state.mediaStream);
@@ -87,16 +122,37 @@ async function startSession(): Promise<void> {
   state.worklet.connect(state.audioCtx.destination); // keep worklet pulled on iOS
 
   if (!token.mock) {
+    // Connect IMMEDIATELY after minting — the ephemeral token's
+    // new_session_expire_time is 1 minute; mint->connect must be fast.
     state.ws = new WebSocket(token.ws_url!);
     state.ws.binaryType = "arraybuffer";
-    state.ws.onopen = () => setStatus("connected");
-    state.ws.onmessage = (ev: MessageEvent) => {
-      if (typeof ev.data !== "string") return void playAudio(ev.data);
-      const msg = JSON.parse(ev.data) as { type?: string; text?: string };
-      if (msg.type === "transcript.user" && msg.text) $("#tt-user")!.textContent = msg.text;
-      if (msg.type === "transcript.tutor" && msg.text) $("#tt-tutor")!.textContent = msg.text;
+    state.ws.onopen = () => {
+      setStatus("sending setup…");
+      state.ws!.send(JSON.stringify({
+        setup: {
+          model: "models/gemini-3.8-live",
+          generation_config: {
+            response_modalities: ["AUDIO"],
+            speech_config: { voice_config: { prebuilt_voice_config: { voice_name: "Aoede" } } },
+          },
+          system_instruction: { parts: [{ text: TUTOR_PROMPT }] },
+        },
+      }));
     };
-    state.ws.onclose = () => setStatus("disconnected");
+    state.ws.onmessage = (ev: MessageEvent) => {
+      if (typeof ev.data === "string") { /* JSON control/text frame */ } else { return void playAudio(ev.data); }
+      const msg = JSON.parse(ev.data as string) as LiveMsg;
+      if (msg.setupComplete) setStatus("live — tutor listening");
+      const sc = msg.serverContent;
+      if (!sc) return;
+      const parts = sc.modelTurn?.parts ?? [];
+      for (const p of parts) {
+        if (p.text) $("#tt-tutor")!.textContent = p.text;
+      }
+      if (sc.inputTranscription?.text) $("#tt-user")!.textContent = sc.inputTranscription.text;
+      if (sc.interrupted) setStatus("barge-in");
+    };
+    state.ws.onclose = (ev) => setStatus(`disconnected (${ev.code})`);
   }
 
   // Wake Lock: keep screen on while practicing (iOS 16.4+)

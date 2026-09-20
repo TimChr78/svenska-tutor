@@ -21,7 +21,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "sessions.db"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
-PROVIDERS = {}
+PROVIDERS: dict[str, bool] = {}
 PROVIDERS["gemini"] = bool(os.environ.get("GEMINI_API_KEY"))
 PROVIDERS["openai"] = bool(os.environ.get("OPENAI_API_KEY"))
 
@@ -113,17 +113,28 @@ def mint_token(provider: str, body: TokenRequest,
     if provider == "gemini":
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
-            return TokenResponse(provider=provider, mock=True, session_id_hint=session_id)  # type: ignore[call-arg]
-        resp = httpx.post(
-            "https://generativelanguage.googleapis.com/v1beta/authTokens",
-            headers={"x-goog-api-key": key},
-            json={"config": {"uses": 1, "expireTime": _in_minutes(2)}},
-            timeout=15,
+            return TokenResponse(provider=provider, mock=True)  # type: ignore[call-arg]
+        # The raw REST endpoint 404s — ephemeral token minting goes through the
+        # official google-genai SDK (verified 2026-09-20).
+        import datetime
+
+        from google import genai
+
+        client = genai.Client(api_key=key)
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        token = client.auth_tokens.create(
+            config={
+                "uses": 1,
+                "expire_time": now + datetime.timedelta(minutes=30),
+                # Browser must connect within 1 minute of minting.
+                "new_session_expire_time": now + datetime.timedelta(minutes=1),
+            }
         )
-        resp.raise_for_status()
-        tok = resp.json()["name"].split("/")[-1]
-        return TokenResponse(provider=provider, credential=tok,
-                             ws_url=f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={tok}")
+        tok = token.name.split("/")[-1]
+        # Ephemeral tokens REQUIRE the Constrained endpoint with access_token.
+        ws = (f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage"
+              f".v1beta.GenerativeService.BidiGenerateContentConstrained?access_token={tok}")
+        return TokenResponse(provider=provider, credential=tok, ws_url=ws)
 
     key = os.environ.get("OPENAI_API_KEY")
     if not key:

@@ -27,3 +27,33 @@ describe('token response handling', () => {
     expect(shouldConnect).toBe(true);
   });
 });
+
+describe('LiveMsg serverContent parsing', () => {
+  function parse(raw: string): { tutorText?: string; userText?: string } {
+    const msg = JSON.parse(raw);
+    const out: { tutorText?: string; userText?: string } = {};
+    const parts = msg.serverContent?.modelTurn?.parts ?? [];
+    for (const p of parts) if (p.text) out.tutorText = p.text;
+    if (msg.serverContent?.inputTranscription?.text) out.userText = msg.serverContent.inputTranscription.text;
+    return out;
+  }
+
+  it('extracts tutor text from modelTurn parts', () => {
+    const out = parse(JSON.stringify({
+      serverContent: { modelTurn: { parts: [{ text: 'Hej! Hur mår du?' }] } },
+    }));
+    expect(out.tutorText).toBe('Hej! Hur mår du?');
+  });
+
+  it('extracts user transcription', () => {
+    const out = parse(JSON.stringify({
+      serverContent: { inputTranscription: { text: 'Jag heter Ann' } },
+    }));
+    expect(out.userText).toBe('Jag heter Ann');
+  });
+
+  it('handles frames with no text parts', () => {
+    const out = parse(JSON.stringify({ serverContent: { modelTurn: { parts: [{}] } } }));
+    expect(out.tutorText).toBeUndefined();
+  });
+});
