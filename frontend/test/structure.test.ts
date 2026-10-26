@@ -70,3 +70,13 @@ describe('main.ts structure', () => {
     expect(source).toContain('realtimeInput: { audio:');
   });
 });
+
+describe('recorder worklet', () => {
+  it('batches mic audio instead of posting every 8 ms render quantum', async () => {
+    // Gemini Live accepts 20 ms chunks without error and then never answers;
+    // 50-100 ms batches work. Keep the worklet at ~100 ms.
+    const worklet = (await import('../public/worklets/recorder-worklet.js?raw')).default;
+    expect(worklet).toContain('Math.round(sampleRate * 0.1)');
+    expect(worklet).toContain('this.port.postMessage');
+  });
+});
