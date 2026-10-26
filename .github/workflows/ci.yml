@@ -30,17 +30,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: "22"
+          bun-version: "1"
+      # The repo ships bun.lock, not package-lock.json — `npm ci` can never work.
       - name: Install deps
-        run: npm ci
+        run: bun install --frozen-lockfile
         working-directory: frontend
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: bunx tsc --noEmit
         working-directory: frontend
       - name: Tests
-        run: npx vitest run
+        run: bunx vitest run
+        working-directory: frontend
+      - name: Build
+        run: bunx vite build
         working-directory: frontend
 
   docker-build:

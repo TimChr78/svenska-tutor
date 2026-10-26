@@ -9,6 +9,7 @@ import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager as _asynccontextmanager
+from datetime import UTC
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -122,7 +123,7 @@ def mint_token(provider: str, body: TokenRequest,
         from google import genai
 
         client = genai.Client(api_key=key)
-        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        now = datetime.datetime.now(tz=datetime.UTC)
         token = client.auth_tokens.create(
             config={
                 "uses": 1,
@@ -155,8 +156,8 @@ def mint_token(provider: str, body: TokenRequest,
 
 
 def _in_minutes(n: int) -> str:
-    from datetime import datetime, timedelta, timezone
-    return (datetime.now(timezone.utc) + timedelta(minutes=n)).isoformat()
+    from datetime import datetime, timedelta
+    return (datetime.now(UTC) + timedelta(minutes=n)).isoformat()
 
 
 class TurnLog(BaseModel):
