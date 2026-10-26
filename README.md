@@ -19,10 +19,10 @@ might help others build the same for their families.
   (three-vrm) with audio-driven mouth movement and idle motion
 - **Thai fallback** — grammar explanations in Thai when she struggles, then
   back to Swedish
-- **Correction log** — every correction saved (said → better → rule) with an
-  end-of-session recap
 - **PWA** — installable on iPhone/iPad/Android; Wake Lock keeps the screen on
   during practice
+- **Correction log** — planned for Phase 2: corrections saved (said → better →
+  rule) with an end-of-session recap
 
 ## Status
 
@@ -32,13 +32,24 @@ development. See [docs/plan.md](docs/plan.md) for the full plan.
 ## Self-hosting (Unraid / Docker)
 
 ```bash
-cp .env.example .env    # add your API keys
-docker compose up -d    # http://<host>:3000
+cp .env.example .env          # add your API keys
+docker compose up -d --build  # http://<host>:3100
 ```
 
 Requires at least one of: `GEMINI_API_KEY` (aistudio.google.com) or
 `OPENAI_API_KEY` (platform.openai.com). Keys never leave the server — the
 browser gets short-lived ephemeral credentials minted by the backend.
+
+### Microphone needs HTTPS
+
+Browsers only expose the microphone in a secure context, so
+`http://<lan-ip>:3100` cannot record audio (iOS Safari in particular). Put the
+app behind TLS. With Tailscale on the host:
+
+```bash
+tailscale serve --bg --https=8444 http://127.0.0.1:3100
+# then open https://<host>.<tailnet>.ts.net:8444
+```
 
 ## Stack
 
