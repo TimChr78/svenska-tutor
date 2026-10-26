@@ -137,8 +137,9 @@ def test_review_stores_corrections(client: TestClient, monkeypatch) -> None:
 
         def json(self) -> dict:
             return {"candidates": [{"content": {"parts": [{"text": (
-                '[{"said": "Jag är tjugo år", "better": "Jag är tjugo år.", '
-                '"rule_th": "ใช้ är när man beskriver ålder"}]'
+                '{"corrections": [{"said": "Jag är tjugo år", '
+                '"better": "Jag är tjugo år.", '
+                '"rule_th": "ใช้ är när man beskriver ålder"}]}'
             )}]}}]}
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
@@ -155,3 +156,23 @@ def test_review_stores_corrections(client: TestClient, monkeypatch) -> None:
     # Re-running replaces instead of duplicating.
     body = client.post(f"/api/session/{sid}/review", headers=_auth(client)).json()
     assert len(body["corrections"]) == 1
+
+
+def test_review_reports_a_slow_model_as_504(client: TestClient, monkeypatch) -> None:
+    import httpx
+
+    sid = client.post("/api/token/gemini", json={"provider": "gemini"},
+                      headers=_auth(client)).json()["session_id"]
+    client.post("/api/log/turn", json={
+        "session_id": sid, "speaker": "user", "sv_text": "Jag heter Tim.",
+    }, headers=_auth(client))
+
+    def boom(*args, **kwargs):
+        raise httpx.ReadTimeout("too slow")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "post", boom)
+
+    resp = client.post(f"/api/session/{sid}/review", headers=_auth(client))
+    assert resp.status_code == 504
+    assert "timed out" in resp.json()["detail"]

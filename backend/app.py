@@ -251,7 +251,11 @@ class Correction(BaseModel):
     rule_th: str | None = None
 
 
-REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "gemini-3.8-flash")
+# The review runs while the learner is waiting for their recap, so it has to be
+# quick. gemini-3.8-flash blew past a 60s timeout on a short transcript (it
+# spends the time thinking even with thinkingBudget=0); 2.5-flash answers in
+# under two seconds.
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "gemini-2.5-flash")
 
 REVIEW_PROMPT = """You are a Swedish teacher reviewing the transcript of a spoken
 lesson with a native Thai speaker. Pick at most 5 mistakes the learner actually
@@ -263,19 +267,25 @@ For each one:
 - rule_th: one short sentence in Thai naming the rule
 
 Only report real errors from the learner's lines. If the learner made no
-significant mistakes, return an empty list."""
+significant mistakes, return an empty corrections list."""
 
 REVIEW_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "said": {"type": "string"},
-            "better": {"type": "string"},
-            "rule_th": {"type": "string"},
-        },
-        "required": ["said", "better", "rule_th"],
+    "type": "object",
+    "properties": {
+        "corrections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "said": {"type": "string"},
+                    "better": {"type": "string"},
+                    "rule_th": {"type": "string"},
+                },
+                "required": ["said", "better", "rule_th"],
+            },
+        }
     },
+    "required": ["corrections"],
 }
 
 
@@ -304,28 +314,35 @@ def review_session(session_id: int, authorization: str = Depends(require_passwor
     if not key:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
 
-    resp = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{REVIEW_MODEL}:generateContent",
-        headers={"x-goog-api-key": key},
-        json={
-            "systemInstruction": {"parts": [{"text": REVIEW_PROMPT}]},
-            "contents": [{"parts": [{"text": transcript}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": REVIEW_SCHEMA,
+    try:
+        resp = httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{REVIEW_MODEL}:generateContent",
+            headers={"x-goog-api-key": key},
+            json={
+                "systemInstruction": {"parts": [{"text": REVIEW_PROMPT}]},
+                "contents": [{"parts": [{"text": transcript}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "responseMimeType": "application/json",
+                    "responseSchema": REVIEW_SCHEMA,
+                },
             },
-        },
-        timeout=60,
-    )
+            timeout=30,
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="review model timed out")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"review model unreachable ({type(exc).__name__})")
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"review model failed (HTTP {resp.status_code})")
 
     parts = resp.json()["candidates"][0]["content"]["parts"]
-    text = "".join(p.get("text", "") for p in parts).strip() or "[]"
+    text = "".join(p.get("text", "") for p in parts).strip()
     try:
-        found = [Correction(**c) for c in json.loads(text)]
-    except (ValueError, TypeError):
+        payload = json.loads(text) if text else {"corrections": []}
+        items = payload.get("corrections", []) if isinstance(payload, dict) else payload
+        found = [Correction(**c) for c in items]
+    except (ValueError, TypeError, AttributeError):
         raise HTTPException(status_code=502, detail="review model returned malformed JSON")
 
     with db() as conn:
