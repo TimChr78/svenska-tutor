@@ -20,4 +20,12 @@ button[hidden] { display:none; }
 footer { display:flex; justify-content:space-between; font-size:.8rem; opacity:.6; margin-top:auto; }
 
 #explanation { background:var(--surface); border-radius:12px; padding:.75rem; white-space:pre-wrap; font-size:.95rem; }
+#recap { background:var(--surface); border-radius:12px; padding:.75rem; font-size:.95rem; }
+#recap .tt-head { align-items:center; margin-bottom:.4rem; }
+#recap-close { background:none; border:none; color:inherit; font-size:1.1rem; line-height:1; padding:0 .2rem; cursor:pointer; opacity:.7; }
+.recap-note { font-size:.85rem; opacity:.7; margin-bottom:.5rem; }
+.recap-item { padding:.45rem 0; border-top:1px solid rgba(255,255,255,.08); }
+.recap-said { opacity:.6; text-decoration:line-through; }
+.recap-better { color:#8fd18f; }
+.recap-rule { font-size:.85rem; opacity:.8; margin-top:.15rem; }
 #photo { background:#3a5a40; }

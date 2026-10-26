@@ -5,11 +5,12 @@ static frontend serving. No secrets in this repo: everything from env.
 """
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager as _asynccontextmanager
-from datetime import UTC
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -75,7 +76,7 @@ app = FastAPI(title="svenska-tutor", lifespan=lifespan)
 
 def require_password(authorization: str = Header(default="")) -> None:
     expected = os.environ.get("APP_PASSWORD", "")
-    if not expected or authorization != f"Bearer {expected}":
+    if not expected or not secrets.compare_digest(authorization, f"Bearer {expected}"):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -90,6 +91,8 @@ class TokenResponse(BaseModel):
     ws_url: str | None = None
     mock: bool = False
     model: str | None = None
+    # Every session is logged; the frontend needs the id to write turns back.
+    session_id: int | None = None
 
 
 @app.post("/api/token/{provider}")
@@ -98,8 +101,6 @@ def mint_token(provider: str, body: TokenRequest,
     """Mint a short-lived credential for the browser's direct provider
     connection. Returns a mock credential when the provider key is absent
     (development/CI mode)."""
-    init_db()
-
     import httpx
 
     if provider not in ("gemini", "openai"):
@@ -115,7 +116,7 @@ def mint_token(provider: str, body: TokenRequest,
     if provider == "gemini":
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
-            return TokenResponse(provider=provider, mock=True)  # type: ignore[call-arg]
+            return TokenResponse(provider=provider, mock=True, session_id=session_id)
         # The raw REST endpoint 404s — ephemeral token minting goes through the
         # official google-genai SDK (verified 2026-09-20).
         import datetime
@@ -136,11 +137,12 @@ def mint_token(provider: str, body: TokenRequest,
         # Ephemeral tokens REQUIRE the Constrained endpoint with access_token.
         ws = (f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage"
               f".v1beta.GenerativeService.BidiGenerateContentConstrained?access_token={tok}")
-        return TokenResponse(provider=provider, credential=tok, ws_url=ws)
+        return TokenResponse(provider=provider, credential=tok, ws_url=ws,
+                             model="models/gemini-3.8-live", session_id=session_id)
 
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
-        return TokenResponse(provider=provider, mock=True, session_id_hint=session_id)  # type: ignore[call-arg]
+        return TokenResponse(provider=provider, mock=True, session_id=session_id)
     model = os.environ.get("OPENAI_MODEL", "gpt-realtime-2.1")
     resp = httpx.post(
         "https://api.openai.com/v1/realtime/client_secrets",
@@ -148,16 +150,16 @@ def mint_token(provider: str, body: TokenRequest,
         json={"session": {"type": "realtime", "model": model}},
         timeout=15,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # Surface a bad key as a usable message instead of a 500 stack trace.
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI rejected the credential (HTTP {resp.status_code})",
+        )
     secret = resp.json()["value"]
     return TokenResponse(provider=provider, credential=secret,
                          ws_url=f"wss://api.openai.com/v1/realtime?model={model}",
-                         model=model)
-
-
-def _in_minutes(n: int) -> str:
-    from datetime import datetime, timedelta
-    return (datetime.now(UTC) + timedelta(minutes=n)).isoformat()
+                         model=model, session_id=session_id)
 
 
 class TurnLog(BaseModel):
@@ -167,15 +169,179 @@ class TurnLog(BaseModel):
     th_text: str | None = None
 
 
+def _session_row(conn: sqlite3.Connection, session_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    return row
+
+
 @app.post("/api/log/turn")
 def log_turn(turn: TurnLog, authorization: str = Depends(require_password)) -> dict:
-    init_db()
+    if turn.speaker not in ("user", "tutor"):
+        raise HTTPException(status_code=400, detail="speaker must be user or tutor")
+    if not (turn.sv_text or turn.th_text):
+        raise HTTPException(status_code=400, detail="empty turn")
     with db() as conn:
+        _session_row(conn, turn.session_id)
         conn.execute(
             "INSERT INTO turns (session_id, ts, speaker, sv_text, th_text) VALUES (?,?,?,?,?)",
             (turn.session_id, time.time(), turn.speaker, turn.sv_text, turn.th_text),
         )
     return {"ok": True}
+
+
+@app.post("/api/session/{session_id}/end")
+def end_session(session_id: int, authorization: str = Depends(require_password)) -> dict:
+    """Close a session. Idempotent: a second call keeps the first timestamp."""
+    with db() as conn:
+        row = _session_row(conn, session_id)
+        ended_at = row["ended_at"] or time.time()
+        if row["ended_at"] is None:
+            conn.execute("UPDATE sessions SET ended_at = ? WHERE id = ?", (ended_at, session_id))
+        turns = conn.execute(
+            "SELECT COUNT(*) FROM turns WHERE session_id = ?", (session_id,)
+        ).fetchone()[0]
+    return {
+        "id": session_id,
+        "ended_at": ended_at,
+        "seconds": round(ended_at - row["started_at"], 1),
+        "turns": turns,
+    }
+
+
+@app.get("/api/session/{session_id}")
+def get_session(session_id: int, authorization: str = Depends(require_password)) -> dict:
+    with db() as conn:
+        row = _session_row(conn, session_id)
+        turns = conn.execute(
+            "SELECT id, ts, speaker, sv_text, th_text FROM turns "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        corrections = conn.execute(
+            "SELECT id, said, better, rule_th FROM corrections "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return {
+        "session": dict(row),
+        "turns": [dict(t) for t in turns],
+        "corrections": [dict(c) for c in corrections],
+    }
+
+
+@app.get("/api/sessions")
+def list_sessions(limit: int = 20, authorization: str = Depends(require_password)) -> dict:
+    limit = max(1, min(limit, 100))
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.provider, s.started_at, s.ended_at, s.scenario, "
+            "  (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) AS turns, "
+            "  (SELECT COUNT(*) FROM corrections c WHERE c.session_id = s.id) AS corrections "
+            "FROM sessions s ORDER BY s.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {"sessions": [dict(r) for r in rows]}
+
+
+class Correction(BaseModel):
+    said: str
+    better: str
+    rule_th: str | None = None
+
+
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "gemini-3.8-flash")
+
+REVIEW_PROMPT = """You are a Swedish teacher reviewing the transcript of a spoken
+lesson with a native Thai speaker. Pick at most 5 mistakes the learner actually
+made and that are worth practising.
+
+For each one:
+- said: what the learner said, verbatim, in Swedish
+- better: the corrected Swedish (natural, SFI level)
+- rule_th: one short sentence in Thai naming the rule
+
+Only report real errors from the learner's lines. If the learner made no
+significant mistakes, return an empty list."""
+
+REVIEW_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "said": {"type": "string"},
+            "better": {"type": "string"},
+            "rule_th": {"type": "string"},
+        },
+        "required": ["said", "better", "rule_th"],
+    },
+}
+
+
+@app.post("/api/session/{session_id}/review")
+def review_session(session_id: int, authorization: str = Depends(require_password)) -> dict:
+    """Extract corrections from a finished session and store them.
+
+    Runs one cheap flash call over the transcript. Existing corrections for the
+    session are replaced, so this is safe to re-run.
+    """
+    import httpx
+
+    with db() as conn:
+        _session_row(conn, session_id)
+        turns = conn.execute(
+            "SELECT speaker, sv_text FROM turns WHERE session_id = ? "
+            "AND sv_text IS NOT NULL AND sv_text != '' ORDER BY id",
+            (session_id,),
+        ).fetchall()
+
+    if not turns:
+        return {"corrections": [], "reason": "no turns logged"}
+
+    transcript = "\n".join(f"{t['speaker']}: {t['sv_text']}" for t in turns)
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
+
+    resp = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{REVIEW_MODEL}:generateContent",
+        headers={"x-goog-api-key": key},
+        json={
+            "systemInstruction": {"parts": [{"text": REVIEW_PROMPT}]},
+            "contents": [{"parts": [{"text": transcript}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+                "responseSchema": REVIEW_SCHEMA,
+            },
+        },
+        timeout=60,
+    )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"review model failed (HTTP {resp.status_code})")
+
+    parts = resp.json()["candidates"][0]["content"]["parts"]
+    text = "".join(p.get("text", "") for p in parts).strip() or "[]"
+    try:
+        found = [Correction(**c) for c in json.loads(text)]
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=502, detail="review model returned malformed JSON")
+
+    with db() as conn:
+        conn.execute("DELETE FROM corrections WHERE session_id = ?", (session_id,))
+        for c in found[:5]:
+            conn.execute(
+                "INSERT INTO corrections (session_id, ts, said, better, rule_th) "
+                "VALUES (?,?,?,?,?)",
+                (session_id, time.time(), c.said, c.better, c.rule_th),
+            )
+        rows = conn.execute(
+            "SELECT id, said, better, rule_th FROM corrections "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return {"corrections": [dict(r) for r in rows]}
 
 
 @app.get("/api/health")

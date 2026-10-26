@@ -42,6 +42,10 @@ const EXPECTED_TOP_LEVEL = [
   'downscaleToJpeg',
   'onPhotoFile',
   'addTranscript',
+  'flushTurn',
+  'logTurn',
+  'endAndReview',
+  'renderRecap',
   'setLevel',
   'pcmLevel',
   'wire',
@@ -61,6 +65,15 @@ describe('main.ts structure', () => {
     // which killed microphone capture in the deployed build.
     expect(source).toContain('/worklets/recorder-worklet.js');
     expect(source).not.toContain('/src/worklets');
+  });
+
+  it('logs turns and reviews the session on stop', () => {
+    // The backend has always had /api/log/turn and the corrections table; the
+    // frontend never called them, so every session was an empty row.
+    expect(source).toContain('session_id: sessionId');
+    expect(source).toContain('/api/log/turn');
+    expect(source).toContain('/api/session/${sessionId}/review');
+    expect(source).toContain('flushTurn();');
   });
 
   it('does not send audio through the silently-ignored mediaChunks field', () => {
