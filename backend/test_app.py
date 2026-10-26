@@ -13,7 +13,8 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("APP_PASSWORD", "testpass")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    import app
+    from backend import app
+
     importlib.reload(app)
     # Entering the context runs the lifespan hook, which creates the schema.
     with TestClient(app.app) as client:
@@ -214,3 +215,109 @@ def test_vision_reports_an_explanation(client: TestClient, monkeypatch) -> None:
     body = client.post("/api/vision/gemini", json={"image_b64": "AAAA"}, headers=_auth(client)).json()
     assert body["explanation"].startswith("Övning 1")
     assert "inlineData" in seen["parts"][1]
+
+
+# --------------------------------------------------------------------------
+# Settings / key storage
+# ----------------------------------------------------------------
+
+
+def _fake_validator(ok: bool = True):
+    def validate(provider: str, value: str) -> tuple[bool, str]:
+        return ok, "ok" if ok else "the provider rejected this key"
+
+    return validate
+
+
+def test_settings_start_empty(client: TestClient) -> None:
+    body = client.get("/api/settings", headers=_auth(client)).json()
+    assert body["encrypted_at_rest"] is True
+    for provider in body["providers"]:
+        assert provider["configured"] is False
+        assert provider["source"] == "none"
+
+
+def test_saved_key_is_never_returned(client: TestClient, monkeypatch, tmp_path) -> None:
+    from backend import app as app_module
+
+    secret = "AIzaSECRETVALUE0123456789abcdef"
+    monkeypatch.setattr(app_module, "validate_key", _fake_validator(True))
+
+    body = client.put("/api/settings/keys/gemini", json={"key": secret},
+                      headers=_auth(client)).json()
+    assert body["configured"] is True
+    assert body["source"] == "ui"
+    assert body["hint"] == "…cdef"
+    assert secret not in str(body)
+
+    listing = client.get("/api/settings", headers=_auth(client)).text
+    assert secret not in listing
+
+    # At rest: the database holds ciphertext, not the key.
+    raw = (tmp_path / "sessions.db").read_bytes()
+    assert secret.encode() not in raw
+    assert (tmp_path / "master.key").stat().st_mode & 0o777 == 0o600
+
+
+def test_rejected_key_is_not_stored(client: TestClient, monkeypatch) -> None:
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "validate_key", _fake_validator(False))
+    resp = client.put("/api/settings/keys/openai", json={"key": "sk-typo"},
+                      headers=_auth(client))
+    assert resp.status_code == 422
+    assert "rejected" in resp.json()["detail"]
+    body = client.get("/api/settings", headers=_auth(client)).json()
+    assert body["providers"][1]["source"] == "none"
+
+
+def test_saved_key_overrides_env_and_delete_restores_it(
+    client: TestClient, monkeypatch
+) -> None:
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "validate_key", _fake_validator(True))
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key-1234")
+
+    client.put("/api/settings/keys/gemini", json={"key": "ui-key-5678"},
+               headers=_auth(client))
+    assert app_module.get_key("gemini") == "ui-key-5678"
+
+    body = client.delete("/api/settings/keys/gemini", headers=_auth(client)).json()
+    assert body["source"] == "env"
+    assert body["configured"] is True
+    assert app_module.get_key("gemini") == "env-key-1234"
+
+
+def test_health_uses_the_effective_key(client: TestClient, monkeypatch) -> None:
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "validate_key", _fake_validator(True))
+    assert client.get("/api/health").json()["providers"] == ["mock"]
+
+    client.put("/api/settings/keys/openai", json={"key": "sk-live-abcdefgh"},
+               headers=_auth(client))
+    assert client.get("/api/health").json()["providers"] == ["openai"]
+
+
+def test_lost_master_key_falls_back_to_env(client: TestClient, monkeypatch, tmp_path) -> None:
+    from backend import app as app_module
+
+    monkeypatch.setattr(app_module, "validate_key", _fake_validator(True))
+    client.put("/api/settings/keys/gemini", json={"key": "ui-key-5678"},
+               headers=_auth(client))
+
+    # Simulate a restored database without its master key.
+    (tmp_path / "master.key").write_bytes(b"x" * 32)
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key-1234")
+
+    assert app_module.get_key("gemini") == "env-key-1234"
+    status = client.get("/api/settings", headers=_auth(client)).json()["providers"][0]
+    assert status["unreadable"] is True
+    assert status["source"] == "env"
+
+
+def test_unknown_provider_is_404(client: TestClient) -> None:
+    resp = client.put("/api/settings/keys/anthropic", json={"key": "sk-x"},
+                      headers=_auth(client))
+    assert resp.status_code == 404

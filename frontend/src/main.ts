@@ -56,6 +56,206 @@ function authHeaders(): HeadersInit {
   return { Authorization: `Bearer ${pass}` };
 }
 
+/** Ask for the app password once and remember it for later API calls. */
+function ensurePassword(): boolean {
+  const pass = prompt("App password:");
+  if (!pass) return false;
+  localStorage.setItem("app_password", pass);
+  return true;
+}
+
+type ProviderStatus = {
+  provider: Provider;
+  configured: boolean;
+  source: "ui" | "env" | "none" | "unreadable";
+  hint?: string;
+  env_hint?: string;
+  updated_at?: number;
+  unreadable?: boolean;
+};
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  gemini: "Google Gemini",
+  openai: "OpenAI",
+};
+
+function settingsMessage(text: string, kind: "ok" | "error" = "ok"): void {
+  const el = document.querySelector<HTMLElement>("#settings-message");
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+  el.dataset.kind = kind;
+}
+
+function describeStatus(status: ProviderStatus): string {
+  if (status.source === "ui") {
+    const when = status.updated_at
+      ? new Date(status.updated_at * 1000).toLocaleDateString("sv-SE")
+      : "";
+    return `Sparad i appen ${status.hint ?? ""}${when ? ` · ${when}` : ""}`;
+  }
+  if (status.source === "env") {
+    return `Från serverns miljö ${status.env_hint ?? ""}`;
+  }
+  if (status.unreadable) {
+    return "Nyckeln kan inte läsas (master key saknas) — ange den igen";
+  }
+  return "Ingen nyckel";
+}
+
+function renderSettings(providers: ProviderStatus[]): void {
+  const host = document.querySelector<HTMLElement>("#settings-providers");
+  if (!host) return;
+  host.textContent = "";
+  for (const status of providers) {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+
+    const head = document.createElement("div");
+    head.className = "settings-provider";
+    const name = document.createElement("strong");
+    name.textContent = PROVIDER_LABELS[status.provider] ?? status.provider;
+    const state = document.createElement("span");
+    state.className = status.configured ? "settings-ok" : "settings-missing";
+    state.textContent = describeStatus(status);
+    head.append(name, state);
+
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = status.configured ? "Ny nyckel (valfritt)" : "Klistra in nyckeln";
+    input.dataset.provider = status.provider;
+
+    const actions = document.createElement("div");
+    actions.className = "settings-actions";
+
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "Spara";
+    save.addEventListener("click", () => void saveProviderKey(status.provider, input));
+
+    const test = document.createElement("button");
+    test.type = "button";
+    test.textContent = "Testa";
+    test.disabled = !status.configured;
+    test.addEventListener("click", () => void testProviderKey(status.provider));
+
+    actions.append(save, test);
+
+    if (status.configured && status.source === "ui") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Ta bort";
+      remove.addEventListener("click", () => void removeProviderKey(status.provider));
+      actions.append(remove);
+    }
+
+    row.append(head, input, actions);
+    host.append(row);
+  }
+}
+
+async function loadSettings(): Promise<void> {
+  const resp = await fetch("/api/settings", { headers: authHeaders() });
+  if (resp.status === 401) {
+    if (!ensurePassword()) return;
+    return loadSettings();
+  }
+  if (!resp.ok) {
+    settingsMessage(`Kunde inte läsa inställningarna (${resp.status})`, "error");
+    return;
+  }
+  const body = (await resp.json()) as { providers: ProviderStatus[] };
+  renderSettings(body.providers);
+  settingsMessage("");
+}
+
+async function saveProviderKey(provider: Provider, input: HTMLInputElement): Promise<void> {
+  const key = input.value.trim();
+  if (!key) {
+    settingsMessage("Klistra in en nyckel först.", "error");
+    return;
+  }
+  settingsMessage("Sparar och testar nyckeln…");
+  const resp = await fetch(`/api/settings/keys/${provider}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ key }),
+  });
+  // The value never lives in the DOM longer than this request needs it.
+  input.value = "";
+  if (resp.status === 401) {
+    if (!ensurePassword()) return;
+    return;
+  }
+  if (!resp.ok) {
+    let detail = `Kunde inte spara (${resp.status})`;
+    try {
+      const body = (await resp.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* keep the status message */
+    }
+    settingsMessage(detail, "error");
+    return;
+  }
+  settingsMessage("Nyckeln är sparad.");
+  await loadSettings();
+}
+
+async function testProviderKey(provider: Provider): Promise<void> {
+  settingsMessage("Testar…");
+  const resp = await fetch(`/api/settings/keys/${provider}/test`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (resp.status === 401) {
+    if (!ensurePassword()) return;
+    return;
+  }
+  if (!resp.ok) {
+    settingsMessage(`Testet misslyckades (${resp.status})`, "error");
+    return;
+  }
+  const body = (await resp.json()) as { ok: boolean; detail: string };
+  settingsMessage(
+    body.ok ? "Nyckeln fungerar." : `Nyckeln fungerar inte: ${body.detail}`,
+    body.ok ? "ok" : "error",
+  );
+}
+
+async function removeProviderKey(provider: Provider): Promise<void> {
+  if (!confirm(`Ta bort den sparade nyckeln för ${PROVIDER_LABELS[provider]}?`)) return;
+  const resp = await fetch(`/api/settings/keys/${provider}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (resp.status === 401) {
+    if (!ensurePassword()) return;
+    return;
+  }
+  if (!resp.ok) {
+    settingsMessage(`Kunde inte ta bort nyckeln (${resp.status})`, "error");
+    return;
+  }
+  settingsMessage("Nyckeln togs bort.");
+  await loadSettings();
+}
+
+function openSettings(): void {
+  const panel = document.querySelector<HTMLElement>("#settings");
+  if (!panel) return;
+  panel.hidden = false;
+  settingsMessage("");
+  void loadSettings();
+}
+
+function closeSettings(): void {
+  const panel = document.querySelector<HTMLElement>("#settings");
+  if (panel) panel.hidden = true;
+}
+
 function setStatus(s: string): void {
   const el = document.querySelector<HTMLElement>("#status");
   if (el) el.textContent = s;
@@ -386,12 +586,8 @@ async function startSession(): Promise<void> {
       body: JSON.stringify({ provider, scenario: null }),
     });
     if (resp.status === 401) {
-      const pass = prompt("App password:");
-      if (pass) {
-        localStorage.setItem("app_password", pass);
-        return startSession();
-      }
-      return;
+      if (!ensurePassword()) return;
+      return startSession();
     }
     if (!resp.ok) {
       banner(`Token mint failed: ${resp.status}`);
@@ -584,6 +780,9 @@ function wire(): void {
     const section = document.querySelector<HTMLElement>("#recap");
     if (section) section.hidden = true;
   });
+
+  document.querySelector<HTMLButtonElement>("#settings-open")?.addEventListener("click", openSettings);
+  document.querySelector<HTMLButtonElement>("#settings-close")?.addEventListener("click", closeSettings);
 
   document.querySelector<HTMLButtonElement>("#photo-cam")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#photo-input-cam")?.click();

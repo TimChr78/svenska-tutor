@@ -29,3 +29,22 @@ footer { display:flex; justify-content:space-between; font-size:.8rem; opacity:.
 .recap-better { color:#8fd18f; }
 .recap-rule { font-size:.85rem; opacity:.8; margin-top:.15rem; }
 #photo { background:#3a5a40; }
+
+/* --- settings (API keys) --- */
+#settings-open { background:none; border:none; color:inherit; font-size:1.15rem; padding:0 .3rem; cursor:pointer; opacity:.75; }
+#settings { position:fixed; inset:0; z-index:20; overflow-y:auto; background:var(--bg); padding:1rem; display:flex; flex-direction:column; gap:.75rem; }
+#settings[hidden] { display:none; }
+#settings .tt-head { align-items:center; font-size:.95rem; opacity:1; }
+#settings-close { background:none; border:none; color:inherit; font-size:1.3rem; line-height:1; padding:0 .2rem; cursor:pointer; opacity:.7; }
+.settings-note { font-size:.8rem; opacity:.65; margin:0; }
+.settings-row { background:var(--surface); border-radius:12px; padding:.75rem; display:flex; flex-direction:column; gap:.55rem; }
+.settings-provider { display:flex; flex-direction:column; gap:.15rem; font-size:.9rem; }
+.settings-ok { color:#8fd18f; font-size:.8rem; }
+.settings-missing { color:#e0b050; font-size:.8rem; }
+.settings-row input { font-size:.95rem; padding:.65rem .7rem; border-radius:8px; border:1px solid rgba(255,255,255,.14); background:#0d1116; color:inherit; font-family:ui-monospace, monospace; }
+.settings-actions { display:flex; gap:.5rem; }
+.settings-actions button { font-size:.85rem; padding:.5rem .9rem; border-radius:8px; }
+.settings-actions button:disabled { opacity:.4; }
+.settings-message { font-size:.85rem; margin:0; padding:.5rem .7rem; border-radius:8px; background:#12301c; }
+.settings-message[data-kind="error"] { background:#3a1414; }
+.settings-message[hidden] { display:none; }

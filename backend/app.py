@@ -18,14 +18,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import keystore
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "sessions.db"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
-PROVIDERS: dict[str, bool] = {}
-PROVIDERS["gemini"] = bool(os.environ.get("GEMINI_API_KEY"))
-PROVIDERS["openai"] = bool(os.environ.get("OPENAI_API_KEY"))
+# Provider id -> the environment variable that holds its key. A key saved in the
+# settings screen overrides the environment for that provider.
+KEY_ENV = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 def db() -> sqlite3.Connection:
@@ -61,13 +63,24 @@ def init_db() -> None:
                 better TEXT NOT NULL,
                 rule_th TEXT
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                name TEXT PRIMARY KEY,
+                ciphertext BLOB NOT NULL,   -- AES-GCM, sealed with master.key
+                hint TEXT,                  -- last four characters, for the UI
+                updated_at REAL NOT NULL
+            );
             """
         )
+    # The database holds sealed API keys, so it is not world-readable.
+    os.chmod(DB_PATH, 0o600)
 
 
 @_asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # Create the master key eagerly so a permission problem shows up at boot
+    # instead of on the first save.
+    keystore.load_master_key(DATA_DIR)
     yield
 
 
@@ -78,6 +91,156 @@ def require_password(authorization: str = Header(default="")) -> None:
     expected = os.environ.get("APP_PASSWORD", "")
     if not expected or not secrets.compare_digest(authorization, f"Bearer {expected}"):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+# --------------------------------------------------------------------------
+# Provider keys: stored encrypted, write-only to the browser.
+# ----------------------------------------------------------------
+
+
+def _known_provider(provider: str) -> str:
+    if provider not in KEY_ENV:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {provider}")
+    return provider
+
+
+def _setting_row(provider: str) -> sqlite3.Row | None:
+    with db() as conn:
+        return conn.execute(
+            "SELECT name, ciphertext, hint, updated_at FROM settings WHERE name = ?",
+            (provider,),
+        ).fetchone()
+
+
+def _decrypt_row(provider: str, row: sqlite3.Row) -> str | None:
+    try:
+        return keystore.decrypt(row["ciphertext"], DATA_DIR, aad=provider)
+    except keystore.KeystoreError:
+        # A replaced or missing master.key must not take the whole app down:
+        # we fall back to the environment and tell the UI the value is lost.
+        return None
+
+
+def get_key(provider: str) -> str | None:
+    """The key actually in use: what the UI stored, otherwise the environment."""
+    _known_provider(provider)
+    row = _setting_row(provider)
+    if row is not None:
+        stored = _decrypt_row(provider, row)
+        if stored:
+            return stored
+    env = (os.environ.get(KEY_ENV[provider]) or "").strip()
+    return env or None
+
+
+def key_status(provider: str) -> dict:
+    """Describe a provider without ever revealing the secret itself."""
+    _known_provider(provider)
+    row = _setting_row(provider)
+    env = (os.environ.get(KEY_ENV[provider]) or "").strip()
+    status: dict = {"provider": provider, "configured": False, "source": "none"}
+    unreadable = False
+    if row is not None:
+        if _decrypt_row(provider, row) is not None:
+            status.update(configured=True, source="ui", hint=row["hint"],
+                          updated_at=row["updated_at"])
+        else:
+            unreadable = True
+            status["updated_at"] = row["updated_at"]
+    if not status["configured"] and env:
+        status.update(configured=True, source="env", env_hint=keystore.hint(env))
+    if unreadable:
+        status["unreadable"] = True
+    return status
+
+
+def validate_key(provider: str, value: str) -> tuple[bool, str]:
+    """Ask the provider whether it accepts this key. No tokens are spent."""
+    import httpx
+
+    try:
+        if provider == "gemini":
+            resp = httpx.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"pageSize": 1},
+                headers={"x-goog-api-key": value},
+                timeout=15,
+            )
+        else:
+            resp = httpx.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {value}"},
+                timeout=15,
+            )
+    except httpx.TimeoutException:
+        return False, "leverantören svarade inte i tid"
+    except httpx.HTTPError:
+        return False, "kunde inte nå leverantören"
+    if resp.status_code == 400 and provider == "gemini":
+        return False, "nyckeln ser felformad ut"
+    if resp.status_code in (401, 403):
+        return False, "leverantören avvisade nyckeln"
+    if resp.status_code >= 400:
+        return False, f"leverantören svarade HTTP {resp.status_code}"
+    return True, "ok"
+
+
+def store_key(provider: str, value: str) -> dict:
+    _known_provider(provider)
+    value = value.strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="the key is empty")
+    ok, detail = validate_key(provider, value)
+    if not ok:
+        # Never store something the provider just refused: a typo would
+        # otherwise look saved and break the next lesson.
+        raise HTTPException(status_code=422, detail=detail)
+    blob = keystore.encrypt(value, DATA_DIR, aad=provider)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO settings (name, ciphertext, hint, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, "
+            "hint=excluded.hint, updated_at=excluded.updated_at",
+            (provider, blob, keystore.hint(value), time.time()),
+        )
+    return key_status(provider)
+
+
+class KeyIn(BaseModel):
+    key: str
+
+
+@app.get("/api/settings")
+def read_settings(authorization: str = Depends(require_password)) -> dict:
+    return {
+        "providers": [key_status(p) for p in KEY_ENV],
+        "encrypted_at_rest": True,
+    }
+
+
+@app.put("/api/settings/keys/{provider}")
+def write_key(provider: str, body: KeyIn,
+              authorization: str = Depends(require_password)) -> dict:
+    return store_key(provider, body.key)
+
+
+@app.delete("/api/settings/keys/{provider}")
+def remove_key(provider: str, authorization: str = Depends(require_password)) -> dict:
+    _known_provider(provider)
+    with db() as conn:
+        conn.execute("DELETE FROM settings WHERE name = ?", (provider,))
+    return key_status(provider)
+
+
+@app.post("/api/settings/keys/{provider}/test")
+def test_key(provider: str, authorization: str = Depends(require_password)) -> dict:
+    _known_provider(provider)
+    current = get_key(provider)
+    if not current:
+        raise HTTPException(status_code=400, detail="no key configured")
+    ok, detail = validate_key(provider, current)
+    return {"ok": ok, "detail": detail, "provider": provider}
+
 
 
 class TokenRequest(BaseModel):
@@ -114,7 +277,7 @@ def mint_token(provider: str, body: TokenRequest,
         session_id = cur.lastrowid
 
     if provider == "gemini":
-        key = os.environ.get("GEMINI_API_KEY")
+        key = get_key("gemini")
         if not key:
             return TokenResponse(provider=provider, mock=True, session_id=session_id)
         # The raw REST endpoint 404s — ephemeral token minting goes through the
@@ -140,7 +303,7 @@ def mint_token(provider: str, body: TokenRequest,
         return TokenResponse(provider=provider, credential=tok, ws_url=ws,
                              model="models/gemini-3.8-live", session_id=session_id)
 
-    key = os.environ.get("OPENAI_API_KEY")
+    key = get_key("openai")
     if not key:
         return TokenResponse(provider=provider, mock=True, session_id=session_id)
     model = os.environ.get("OPENAI_MODEL", "gpt-realtime-2.1")
@@ -310,9 +473,9 @@ def review_session(session_id: int, authorization: str = Depends(require_passwor
         return {"corrections": [], "reason": "no turns logged"}
 
     transcript = "\n".join(f"{t['speaker']}: {t['sv_text']}" for t in turns)
-    key = os.environ.get("GEMINI_API_KEY")
+    key = get_key("gemini")
     if not key:
-        raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
+        raise HTTPException(status_code=400, detail="no Gemini key configured")
 
     try:
         resp = httpx.post(
@@ -363,7 +526,8 @@ def review_session(session_id: int, authorization: str = Depends(require_passwor
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "providers": [p for p, ok in PROVIDERS.items() if ok] or ["mock"]}
+    configured = [p for p in KEY_ENV if get_key(p)]
+    return {"ok": True, "providers": configured or ["mock"]}
 
 
 # --- static frontend (last: API routes take precedence) ---
@@ -403,9 +567,9 @@ def vision(provider: str, body: VisionRequest,
 
     image_url = f"data:{body.mime};base64,{body.image_b64}"
     if provider == "gemini":
-        key = os.environ.get("GEMINI_API_KEY")
+        key = get_key("gemini")
         if not key:
-            raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
+            raise HTTPException(status_code=400, detail="no Gemini key configured")
         try:
             resp = httpx.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{VISION_MODEL}:generateContent",
@@ -426,9 +590,9 @@ def vision(provider: str, body: VisionRequest,
         text = " ".join(p.get("text", "") for p in parts).strip()
         return {"explanation": text}
 
-    key = os.environ.get("OPENAI_API_KEY")
+    key = get_key("openai")
     if not key:
-        raise HTTPException(status_code=400, detail="OPENAI_API_KEY not configured")
+        raise HTTPException(status_code=400, detail="no OpenAI key configured")
     model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
     try:
         resp = httpx.post(

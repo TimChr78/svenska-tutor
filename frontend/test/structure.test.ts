@@ -48,6 +48,13 @@ const EXPECTED_TOP_LEVEL = [
   'renderRecap',
   'setLevel',
   'pcmLevel',
+  'loadSettings',
+  'renderSettings',
+  'saveProviderKey',
+  'testProviderKey',
+  'removeProviderKey',
+  'openSettings',
+  'closeSettings',
   'wire',
 ];
 
@@ -74,6 +81,20 @@ describe('main.ts structure', () => {
     expect(source).toContain('/api/log/turn');
     expect(source).toContain('/api/session/${sessionId}/review');
     expect(source).toContain('flushTurn();');
+  });
+
+  it('keeps API keys out of the DOM and out of storage', () => {
+    // The settings panel is write-only: the server returns a hint, never the key.
+    expect(source).toContain('/api/settings/keys/${provider}');
+    expect(source).not.toContain('localStorage.setItem("gemini');
+    expect(source).not.toContain('localStorage.setItem("openai');
+    // Keys are typed into a password field and cleared as soon as they are sent.
+    expect(source).toContain('input.type = "password"');
+    expect(source).toContain('input.value = ""');
+    // The panel is built with textContent, never innerHTML.
+    const renderStart = source.indexOf('function renderSettings');
+    const renderEnd = source.indexOf('async function loadSettings');
+    expect(source.slice(renderStart, renderEnd)).not.toContain('innerHTML');
   });
 
   it('does not send audio through the silently-ignored mediaChunks field', () => {

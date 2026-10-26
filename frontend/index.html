@@ -19,6 +19,7 @@
           <option value="openai">OpenAI</option>
         </select>
       </label>
+      <button id="settings-open" type="button" title="API-nycklar" aria-label="Inställningar">⚙</button>
     </header>
 
     <div id="banner" hidden></div>
@@ -60,6 +61,19 @@
       <div id="recap-note" class="recap-note"></div>
       <div id="recap-list"></div>
     </section>
+
+    <aside id="settings" hidden aria-label="API-nycklar">
+      <div class="tt-head">
+        <span>API-nycklar</span>
+        <button id="settings-close" type="button" aria-label="Stäng">×</button>
+      </div>
+      <p class="settings-note">
+        Nycklarna sparas krypterade på servern och skickas aldrig tillbaka hit.
+        Lämna fältet tomt för att behålla den nuvarande nyckeln.
+      </p>
+      <div id="settings-providers"></div>
+      <p id="settings-message" class="settings-message" hidden></p>
+    </aside>
 
     <footer>
       <span id="status">idle</span>

@@ -51,6 +51,25 @@ tailscale serve --bg --https=8444 http://127.0.0.1:3100
 # then open https://<host>.<tailnet>.ts.net:8444
 ```
 
+### API keys without touching `.env`
+
+Open the gear in the app header. Each provider shows where its key comes from
+(`serverns miljö` = environment, `appen` = saved through the UI) and only the
+last four characters, never the key itself.
+
+- **Spara** validates the key against the provider first, so a typo cannot be
+  stored and silently break the next lesson.
+- **Testa** checks whichever key is currently in use.
+- **Ta bort** drops the saved key and falls back to the environment variable.
+
+Saved keys are sealed with AES-GCM under a random 32-byte master key in
+`<DATA_DIR>/master.key` (mode 0600), so a copy of `sessions.db` on its own is
+useless. **Back up `master.key` with `sessions.db`**: without it the stored keys
+cannot be decrypted (the app falls back to the environment and the panel says
+so), while everything else — sessions, turns, corrections — stays readable.
+Nothing secret is ever sent back to the browser, written to `localStorage`, or
+logged.
+
 ## Stack
 
 - **Backend**: Python FastAPI (auth, ephemeral-token minting, session log)
