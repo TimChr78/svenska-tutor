@@ -176,3 +176,41 @@ def test_review_reports_a_slow_model_as_504(client: TestClient, monkeypatch) -> 
     resp = client.post(f"/api/session/{sid}/review", headers=_auth(client))
     assert resp.status_code == 504
     assert "timed out" in resp.json()["detail"]
+
+
+def test_vision_reports_a_slow_model_as_504(client: TestClient, monkeypatch) -> None:
+    import httpx
+
+    def boom(*args, **kwargs):
+        raise httpx.ReadTimeout("too slow")
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "post", boom)
+
+    resp = client.post("/api/vision/gemini", json={"image_b64": "AAAA"}, headers=_auth(client))
+    assert resp.status_code == 504
+    assert "timed out" in resp.json()["detail"]
+
+
+def test_vision_reports_an_explanation(client: TestClient, monkeypatch) -> None:
+    import httpx
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"candidates": [{"content": {"parts": [{"text": "Övning 1: fyll i rätt verb."}]}}]}
+
+    seen: dict = {}
+
+    def fake_post(url, **kwargs):
+        seen["url"] = url
+        seen["parts"] = kwargs["json"]["contents"][0]["parts"]
+        return FakeResponse()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    body = client.post("/api/vision/gemini", json={"image_b64": "AAAA"}, headers=_auth(client)).json()
+    assert body["explanation"].startswith("Övning 1")
+    assert "inlineData" in seen["parts"][1]

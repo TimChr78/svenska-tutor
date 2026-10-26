@@ -378,6 +378,11 @@ if FRONTEND_DIST.exists():
         return FileResponse(FRONTEND_DIST / "index.html")
 
 
+# Same story as the review call: gemini-3.8-flash never came back on a plain
+# image request (55s+), while 2.5-flash describes a page in under two seconds.
+VISION_MODEL = os.environ.get("VISION_MODEL", "gemini-2.5-flash")
+
+
 class VisionRequest(BaseModel):
     image_b64: str
     mime: str = "image/jpeg"
@@ -401,16 +406,22 @@ def vision(provider: str, body: VisionRequest,
         key = os.environ.get("GEMINI_API_KEY")
         if not key:
             raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
-        resp = httpx.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-            headers={"x-goog-api-key": key},
-            json={"contents": [{"parts": [
-                {"text": body.question},
-                {"inline_data": {"mime_type": body.mime, "data": body.image_b64}},
-            ]}]},
-            timeout=60,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{VISION_MODEL}:generateContent",
+                headers={"x-goog-api-key": key},
+                json={"contents": [{"parts": [
+                    {"text": body.question},
+                    {"inlineData": {"mimeType": body.mime, "data": body.image_b64}},
+                ]}]},
+                timeout=60,
+            )
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="vision model timed out")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"vision model unreachable ({type(exc).__name__})")
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"vision model failed (HTTP {resp.status_code})")
         parts = resp.json()["candidates"][0]["content"]["parts"]
         text = " ".join(p.get("text", "") for p in parts).strip()
         return {"explanation": text}
@@ -419,15 +430,21 @@ def vision(provider: str, body: VisionRequest,
     if not key:
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY not configured")
     model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
-        json={"model": model, "messages": [{"role": "user", "content": [
-            {"type": "text", "text": body.question},
-            {"type": "image_url", "image_url": {"url": image_url}},
-        ]}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": body.question},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]}]},
+            timeout=60,
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="vision model timed out")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"vision model unreachable ({type(exc).__name__})")
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"vision model failed (HTTP {resp.status_code})")
     text = resp.json()["choices"][0]["message"]["content"].strip()
     return {"explanation": text}
