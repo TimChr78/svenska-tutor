@@ -20,6 +20,8 @@ interface TokenResp {
   ws_url: string | null;
   mock: boolean;
   model?: string | null;
+  /** Every mint creates a logged session; turns are written back under this id. */
+  session_id?: number | null;
   detail?: string;
 }
 
@@ -86,6 +88,7 @@ function renderTranscript(which: "user" | "tutor"): void {
 function addTranscript(which: "user" | "tutor", text: string, append: boolean): void {
   transcript[which] = (append ? transcript[which] + text : text).slice(-MAX_TRANSCRIPT_CHARS);
   renderTranscript(which);
+  turnText[which] = (append ? turnText[which] + text : text).slice(-MAX_TRANSCRIPT_CHARS);
 }
 
 function resetTranscript(): void {
@@ -93,6 +96,95 @@ function resetTranscript(): void {
   transcript.tutor = "";
   renderTranscript("user");
   renderTranscript("tutor");
+}
+
+// --- session logging -------------------------------------------------------
+
+/** Text of the exchange currently in flight, written back when the turn ends. */
+const turnText = { user: "", tutor: "" };
+
+async function logTurn(speaker: "user" | "tutor", text: string): Promise<void> {
+  const sessionId = state.sessionId;
+  if (sessionId === null || !text.trim()) return;
+  try {
+    await fetch("/api/log/turn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ session_id: sessionId, speaker, sv_text: text.trim() }),
+    });
+  } catch {
+    // Logging is best-effort: a dropped turn must never break the lesson.
+  }
+}
+
+function flushTurn(): void {
+  const { user, tutor } = turnText;
+  turnText.user = "";
+  turnText.tutor = "";
+  if (user.trim()) void logTurn("user", user);
+  if (tutor.trim()) void logTurn("tutor", tutor);
+}
+
+async function endAndReview(sessionId: number): Promise<void> {
+  try {
+    await fetch(`/api/session/${sessionId}/end`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+  } catch {
+    return;
+  }
+  setStatus("sammanfattar…");
+  try {
+    const resp = await fetch(`/api/session/${sessionId}/review`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    if (!resp.ok) throw new Error(String(resp.status));
+    const body = (await resp.json()) as {
+      corrections?: { said: string; better: string; rule_th: string | null }[];
+      reason?: string;
+    };
+    renderRecap(body.corrections ?? [], body.reason);
+  } catch {
+    renderRecap([], "Kunde inte skapa sammanfattning.");
+  }
+  setStatus("idle");
+}
+
+function renderRecap(
+  corrections: { said: string; better: string; rule_th: string | null }[],
+  note?: string,
+): void {
+  const section = document.querySelector<HTMLElement>("#recap");
+  const list = document.querySelector<HTMLElement>("#recap-list");
+  const head = document.querySelector<HTMLElement>("#recap-note");
+  if (!section || !list) return;
+  list.textContent = "";
+  for (const c of corrections) {
+    const row = document.createElement("div");
+    row.className = "recap-item";
+    const said = document.createElement("div");
+    said.className = "recap-said";
+    said.textContent = c.said;
+    const better = document.createElement("div");
+    better.className = "recap-better";
+    better.textContent = c.better;
+    row.append(said, better);
+    if (c.rule_th) {
+      const rule = document.createElement("div");
+      rule.className = "recap-rule";
+      rule.textContent = c.rule_th;
+      row.append(rule);
+    }
+    list.append(row);
+  }
+  if (head) {
+    head.textContent = corrections.length
+      ? `${corrections.length} att öva på`
+      : (note ?? "Inga större fel den här gången.");
+  }
+  section.hidden = false;
 }
 
 // --- tutor audio playback --------------------------------------------------
@@ -216,6 +308,7 @@ function handleEvents(events: LiveEvent[]): void {
         setStatus("barge-in");
         break;
       case "turnComplete":
+        flushTurn();
         setStatus("live — prata svenska!");
         break;
       case "error":
@@ -269,6 +362,10 @@ function endMicStream(): void {
 
 async function startSession(): Promise<void> {
   if (state.running) return;
+  const recap = document.querySelector<HTMLElement>("#recap");
+  if (recap) recap.hidden = true;
+  turnText.user = "";
+  turnText.tutor = "";
   try {
     // Microphone requires a secure context (HTTPS or localhost) on iOS Safari.
     if (!window.isSecureContext) {
@@ -301,7 +398,7 @@ async function startSession(): Promise<void> {
       return;
     }
     const token = (await resp.json()) as TokenResp;
-    state.sessionId = (token as unknown as { session_id?: number }).session_id ?? null;
+    state.sessionId = token.session_id ?? null;
 
     if (token.mock) {
       banner("Mock provider (no API key configured) — audio loop simulated, nothing sent.");
@@ -407,6 +504,8 @@ async function startSession(): Promise<void> {
 }
 
 async function stopSession(): Promise<void> {
+  const sessionId = state.sessionId;
+  flushTurn();
   endMicStream();
   state.running = false;
   state.ws?.close();
@@ -426,6 +525,8 @@ async function stopSession(): Promise<void> {
   const stopBtn = document.querySelector<HTMLButtonElement>("#stop");
   if (stopBtn) stopBtn.hidden = true;
   setStatus("idle");
+  state.sessionId = null;
+  if (sessionId !== null) void endAndReview(sessionId);
 }
 
 // --- photo homework mode ---------------------------------------------------
@@ -479,6 +580,10 @@ async function onPhotoFile(this: HTMLInputElement): Promise<void> {
 function wire(): void {
   document.querySelector<HTMLButtonElement>("#mic")?.addEventListener("click", () => void startSession());
   document.querySelector<HTMLButtonElement>("#stop")?.addEventListener("click", () => void stopSession());
+  document.querySelector<HTMLButtonElement>("#recap-close")?.addEventListener("click", () => {
+    const section = document.querySelector<HTMLElement>("#recap");
+    if (section) section.hidden = true;
+  });
 
   document.querySelector<HTMLButtonElement>("#photo-cam")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#photo-input-cam")?.click();
